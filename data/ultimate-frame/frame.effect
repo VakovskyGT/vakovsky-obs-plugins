@@ -1,0 +1,188 @@
+// Ultimate Frame: rounded corners, inner/outer stroke, shadow, content zoom/offset.
+// All effect sizes are canvas pixels; px_scale converts source pixels to canvas pixels.
+// The quad may extend `pad` source pixels beyond the source on every side.
+// `image` is premultiplied (as produced by OBS filter rendering); output is straight alpha.
+
+uniform float4x4 ViewProj;
+uniform texture2d image;
+
+uniform float2 size;      // quad size in item px (the cropped part, whole px)
+uniform float4 rect;      // frame shape in item px: x0, y0, x1, y1 (cropped part minus OBS's Alt crop)
+uniform float2 src_size;  // source under the filter, px
+uniform float4 crop_box;  // cropped part in source px: x0, y0, x1, y1
+uniform float2 px_scale;  // canvas px per source px
+uniform float4 radii;     // TL, TR, BR, BL, canvas px
+uniform float  pad;       // source px drawn beyond each edge
+
+uniform float  in_w;
+uniform float  in_soft;
+uniform float4 in_c0;     // straight linear RGBA, opacity folded into alpha
+uniform float4 in_c1;
+uniform float2 in_dir;    // gradient direction (cos, sin)
+uniform float  in_fill;   // 0 solid, 1 linear gradient
+
+uniform float  out_w;
+uniform float  out_soft;
+uniform float4 out_c0;
+uniform float4 out_c1;
+uniform float2 out_dir;
+uniform float  out_fill;
+
+uniform float4 bk_c0;     // backing under the source: straight linear RGBA, opacity folded into alpha
+uniform float4 bk_c1;
+uniform float2 bk_dir;
+uniform float  bk_fill;
+
+uniform float  sh_on;
+uniform float  sh_type;   // 0 outer, 1 inner
+uniform float4 sh_col;    // straight linear RGBA, opacity folded into alpha
+uniform float  sh_blur;
+uniform float2 sh_off;
+
+uniform float  zoom;
+uniform float2 zoom_off;  // canvas px
+
+uniform float4 edge_w;    // fade to transparency per side: L, T, R, B, canvas px (0 = none)
+uniform float4 edge_ext;  // how far the outer effects reach past each side: L, T, R, B, canvas px
+
+sampler_state textureSampler {
+	Filter    = Linear;
+	AddressU  = Clamp;
+	AddressV  = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv  = v_in.uv;
+	return vert_out;
+}
+
+float corner_radius(float2 pc, float2 hs)
+{
+	float r = pc.x < 0.0 ? (pc.y < 0.0 ? radii.x : radii.w) : (pc.y < 0.0 ? radii.y : radii.z);
+	return clamp(r, 0.0, min(hs.x, hs.y));
+}
+
+// Signed distance (canvas px) to the rounded rect centred at the origin; negative inside.
+float sd_frame(float2 pc, float2 hs)
+{
+	float r = corner_radius(pc, hs);
+	float2 q = abs(pc) - hs + r;
+	return length(max(q, float2(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r;
+}
+
+float4 premul(float4 c)
+{
+	return float4(c.rgb * c.a, c.a);
+}
+
+float4 over(float4 src, float4 dst)
+{
+	return src + dst * (1.0 - src.a);
+}
+
+float4 stroke_color(float2 pc, float2 hs, float4 c0, float4 c1, float2 dir, float fill)
+{
+	float span = abs(hs.x * dir.x) + abs(hs.y * dir.y);
+	float t = saturate(dot(pc, dir) / max(span, 0.0001) * 0.5 + 0.5);
+	return lerp(c0, lerp(c0, c1, t), fill);
+}
+
+float edge_ramp(float dist, float w)
+{
+	return w > 0.0 ? smoothstep(0.0, w, dist) : 1.0;
+}
+
+// The edge fade: 0 at the outer edge of everything drawn (shape plus outer effects), 1 at the fade width inside it.
+float edge_mask(float2 pc, float2 hs)
+{
+	return edge_ramp(pc.x + hs.x + edge_ext.x, edge_w.x) * edge_ramp(pc.y + hs.y + edge_ext.y, edge_w.y) *
+	       edge_ramp(hs.x + edge_ext.z - pc.x, edge_w.z) * edge_ramp(hs.y + edge_ext.w - pc.y, edge_w.w);
+}
+
+float4 frame_color(VertData v_in, float full)
+{
+	float2 p      = v_in.uv * (size + 2.0 * pad) - pad;
+	float2 center = (rect.xy + rect.zw) * 0.5;
+	float2 hs     = (rect.zw - rect.xy) * 0.5 * px_scale;
+	float2 pc     = (p - center) * px_scale;
+	float  d      = sd_frame(pc, hs);
+	float  inside = saturate(0.5 - d);
+
+	float2 sp  = crop_box.xy + center + ((pc - zoom_off) / max(zoom, 0.01)) / px_scale; // source px
+	float2 suv = sp / src_size;
+	float  inb = step(crop_box.x, sp.x) * step(sp.x, crop_box.z) * step(crop_box.y, sp.y) * step(sp.y, crop_box.w);
+	float4 content = image.Sample(textureSampler, suv) * inb;
+	float4 acc = content * inside;
+
+	if (full > 0.5) {
+		// Layers inside the shape (content, inner border, inner shadow) and outside it (outer border and shadow) are
+		// composited at full coverage; the anti-aliased edge then splits each pixel between the two stacks once.
+		// Masking every layer by the coverage before compositing lets lower layers bleed through edge pixels.
+		float4 shadow_o = float4(0.0, 0.0, 0.0, 0.0);
+		float4 shadow_i = float4(0.0, 0.0, 0.0, 0.0);
+		if (sh_on > 0.5) {
+			float ds = sd_frame(pc - sh_off, hs);
+			if (sh_type < 0.5) {
+				float a = sh_blur > 0.0 ? 1.0 - smoothstep(-0.5 * sh_blur, 0.5 * sh_blur, ds) : saturate(0.5 - ds);
+				shadow_o = premul(float4(sh_col.rgb, sh_col.a * a));
+			} else {
+				float a = sh_blur > 0.0 ? smoothstep(-sh_blur, 0.0, ds) : saturate(0.5 + ds);
+				shadow_i = premul(float4(sh_col.rgb, sh_col.a * a));
+			}
+		}
+
+		float oa = step(0.0001, out_w) * saturate((out_w - d) / max(out_soft, 1.0) + 0.5);
+		float4 outer = premul(stroke_color(pc, hs, out_c0, out_c1, out_dir, out_fill));
+		outer *= oa;
+
+		float ia = step(0.0001, in_w) * saturate((d + in_w) / max(in_soft, 1.0) + 0.5);
+		float4 inner = premul(stroke_color(pc, hs, in_c0, in_c1, in_dir, in_fill));
+		inner *= ia;
+
+		// Under the source: the outer shadow, then the backing; both show through translucent content.
+		float4 back      = premul(stroke_color(pc, hs, bk_c0, bk_c1, bk_dir, bk_fill));
+		float4 in_stack  = over(over(shadow_i, over(inner, content)), over(back, shadow_o));
+		float4 out_stack = over(outer, shadow_o);
+		acc = in_stack * inside + out_stack * (1.0 - inside);
+	}
+
+	acc *= edge_mask(pc, hs);
+
+	return float4(acc.rgb / max(acc.a, 0.0001), acc.a);
+}
+
+float4 PSBasic(VertData v_in) : TARGET
+{
+	return frame_color(v_in, 0.0);
+}
+
+float4 PSFull(VertData v_in) : TARGET
+{
+	return frame_color(v_in, 1.0);
+}
+
+technique Basic
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSBasic(v_in);
+	}
+}
+
+technique Full
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSFull(v_in);
+	}
+}

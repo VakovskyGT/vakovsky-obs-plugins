@@ -1,0 +1,18 @@
+{
+    "display_name": "Ultimate Frame",
+    "id": "37428d06-bd31-4fdb-82a7-4984a5b47d27",
+    "version": "0.1.0",
+    "authors": [
+        "Vakovsky"
+    ],
+    "name": "ultimate-frame",
+    "description": "Rounded corners, strokes, shadows, crop, edge fade and backing for every scene, animated with the scene transitions.",
+    "long_description": "A filter that rounds the corners of a source and adds an inner and outer border (solid or gradient), a drop or inner shadow, crop, zoom, an edge fade and a backing fill. Each scene can have its own look, animated with Move, Fade or Cut. Sizes are in canvas pixels. Comes with the Fade for Ultimate Frame transition.",
+    "urls": {
+        "repository": "https://github.com/VakovskyGT/vakovsky-obs-plugins",
+        "website": "https://www.twitch.tv/vakovsky",
+        "support": "https://github.com/VakovskyGT/vakovsky-obs-plugins/issues"
+    },
+    "has_banner": false,
+    "has_icon": false
+}

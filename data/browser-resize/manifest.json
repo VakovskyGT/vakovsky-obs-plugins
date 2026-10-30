@@ -1,0 +1,18 @@
+{
+    "display_name": "Browser ReSize",
+    "id": "6e41fc16-c43e-4248-b078-f27d8f740391",
+    "version": "0.1.0",
+    "authors": [
+        "Vakovsky"
+    ],
+    "name": "browser-resize",
+    "description": "Its own page size of a browser source on every scene, resized smoothly with Move.",
+    "long_description": "Gives a browser source, such as a chat, its own page size on each scene. The page is laid out again at the new size, so the text doesn't stretch, and with Move the page grows along with the animation.",
+    "urls": {
+        "repository": "https://github.com/VakovskyGT/vakovsky-obs-plugins",
+        "website": "https://www.twitch.tv/vakovsky",
+        "support": "https://github.com/VakovskyGT/vakovsky-obs-plugins/issues"
+    },
+    "has_banner": false,
+    "has_icon": false
+}

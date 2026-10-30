@@ -1,0 +1,153 @@
+// Browser ReSize: snapshots drawn 1:1 at an anchor or stretched into the frame, and the broken-frame check.
+// Textures are premultiplied; opacity fades the last good frame out over the live page.
+uniform float4x4 ViewProj;
+uniform texture2d image;
+uniform float2 uv_scale;
+uniform float opacity;
+uniform texture2d image2;
+uniform float amount;
+uniform float2 scale_a;
+uniform float2 scale_b;
+uniform float2 anchor;
+uniform float2 sample_a;
+uniform float2 sample_b;
+uniform float2 spill;
+uniform float2 edge;
+
+sampler_state textureSampler {
+	Filter    = Linear;
+	AddressU  = Clamp;
+	AddressV  = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv  = v_in.uv;
+	return vert_out;
+}
+
+
+// stepped resize (test): one step's snapshot (image) into the next (image2), premultiplied. Each is placed 1:1 at the
+// anchor (scale_* = frame size / texture size; with stretch the scale is 1 and the picture fills the frame).
+float4 place_a(float2 uv)
+{
+	float2 t = uv * scale_a + anchor * (1.0 - scale_a);
+	float inside = (t.x >= 0.0 && t.x <= 1.0 && t.y >= 0.0 && t.y <= 1.0) ? 1.0 : 0.0;
+	return image.Sample(textureSampler, t * sample_a) * inside;
+}
+
+float4 place_b(float2 uv)
+{
+	float2 t = uv * scale_b + anchor * (1.0 - scale_b);
+	float inside = (t.x >= 0.0 && t.x <= 1.0 && t.y >= 0.0 && t.y <= 1.0) ? 1.0 : 0.0;
+	return image2.Sample(textureSampler, t * sample_b) * inside;
+}
+
+float4 PSMix(VertData v_in) : TARGET
+{
+	return (place_a(v_in.uv) * (1.0 - amount) + place_b(v_in.uv) * amount) * opacity;
+}
+
+// Just after a resize the browser can hand over a broken frame: the old picture squeezed in, with opaque black
+// strips at the edges. An edge row or column with some pure black and nothing else opaque counts as such a strip.
+float black_px(float4 c)
+{
+	return (c.a > 0.9 && max(max(c.r, c.g), c.b) < 0.03) ? 1.0 : 0.0;
+}
+
+float other_px(float4 c)
+{
+	return (c.a > 0.1 && black_px(c) < 0.5) ? 1.0 : 0.0;
+}
+
+float strip_row(float v)
+{
+	float black = 0.0;
+	float other = 0.0;
+	for (int i = 0; i < 16; i++) {
+		float4 c = image.Sample(textureSampler, float2((float(i) + 0.5) / 16.0, v) * uv_scale);
+		black += black_px(c);
+		other += other_px(c);
+	}
+	return (black > 2.5 && other < 0.5) ? 1.0 : 0.0;
+}
+
+float strip_col(float u)
+{
+	float black = 0.0;
+	float other = 0.0;
+	for (int i = 0; i < 16; i++) {
+		float4 c = image.Sample(textureSampler, float2(u, (float(i) + 0.5) / 16.0) * uv_scale);
+		black += black_px(c);
+		other += other_px(c);
+	}
+	return (black > 2.5 && other < 0.5) ? 1.0 : 0.0;
+}
+
+// Right after a shrink the browser can still draw its old, bigger picture: it runs past the frame into the clear
+// margin the capture leaves on the right and bottom. spill is the texture uv of the margin's column and row (0: none).
+float spilled()
+{
+	if (spill.x <= 0.0)
+		return 0.0;
+	float found = 0.0;
+	for (int i = 0; i < 32; i++) {
+		float k = (float(i) + 0.5) / 32.0;
+		found += image.Sample(textureSampler, float2(k * spill.x, spill.y)).a > 0.1 ? 1.0 : 0.0;
+		found += image.Sample(textureSampler, float2(spill.x, k * spill.y)).a > 0.1 ? 1.0 : 0.0;
+	}
+	return found > 0.5 ? 1.0 : 0.0;
+}
+
+// A squeezed picture can end in a soft, half transparent row: probe the outermost pixel, 2 px in and 0.4% in.
+// side: 0 for the top or left edge, 1 for the bottom or right one
+float strip_rows(float e, float side)
+{
+	return max(max(strip_row(abs(side - e)), strip_row(abs(side - 5.0 * e))), strip_row(abs(side - 0.004)));
+}
+
+float strip_cols(float e, float side)
+{
+	return max(max(strip_col(abs(side - e)), strip_col(abs(side - 5.0 * e))), strip_col(abs(side - 0.004)));
+}
+
+// drawn into a 1x1 target: red 1 = the frame in image is broken
+// edge: the middle of the outermost pixel in uv of the valid area, so a strip one pixel wide is found (0: inset 0.4%)
+float4 PSCheck(VertData v_in) : TARGET
+{
+	float ex = edge.x > 0.0 ? edge.x : 0.004;
+	float ey = edge.y > 0.0 ? edge.y : 0.004;
+	float top = strip_rows(ey, 0.0);
+	float bottom = strip_rows(ey, 1.0);
+	float left = strip_cols(ex, 0.0);
+	float right = strip_cols(ex, 1.0);
+	float spill_found = spilled();
+	float broken = max(max(max(top, bottom), max(left, right)), spill_found);
+	// debug: which edges, in g (top 1, bottom 2, left 4, right 8) / 16; b 1 = the picture spilled into the margin
+	return float4(broken, (top + bottom * 2.0 + left * 4.0 + right * 8.0) / 16.0, spill_found, 1.0);
+}
+
+technique Check
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSCheck(v_in);
+	}
+}
+
+technique Mix
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSMix(v_in);
+	}
+}
